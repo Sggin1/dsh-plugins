@@ -1,31 +1,22 @@
 /**
- * web-search-keyless — a $0 keyless `web_search` provider for DSH.
+ * web-search-keyless -- a `web_search` provider for DSH that needs no paid key by default.
  *
- * The base bundle ships `web-search-deepseek`, which calls the DeepSeek hosted
- * API for every search (needs DEEPSEEK_API_KEY). This plugin registers a second
- * search provider into `ctx.web` that never touches a paid API: it reads public
- * search endpoints directly with plain fetch.
+ * Registers a search provider (`keyless-http`) into `ctx.web`. Engines (config `engines`, tried in this order):
+ *   duckduckgo  (default)  the Instant Answer API (JSON, a public endpoint) and the DuckDuckGo HTML results page
+ *   bing        (opt-in)   the Bing HTML results page. It scrapes a page whose terms restrict automated access:
+ *                          read Microsoft's terms before turning it on, and keep it to personal low-volume use.
+ *   brave       (opt-in)   the Brave Search API, an official API with a key (env var `braveApiKeyEnv`,
+ *                          default BRAVE_SEARCH_API_KEY; the key is never read from the config text).
+ * An unknown engine, or `brave` without its key, throws at load so a typo is seen at start-up.
  *
- *   engines, in order of preference:
- *     1. DuckDuckGo Instant Answer API — entities / instant answers (JSON, no
- *        auth, stable — the dependable core of this provider).
- *     2. DuckDuckGo HTML results page  — result lists (html.duckduckgo.com).
- *     3. Bing HTML results page        — result lists (www.bing.com/search).
+ * To add another provider, add its name to ENGINES, a method that returns [{url, title, snippet}], and an entry in `byName`
+ * inside `search()`; keep a keyed one opt-in and read its key from the environment.
  *
- * Public SERP engines occasionally serve bot challenges (a 200/202/429 page
- * with no result markup) in place of results, so list engines are best-effort
- * and the whole results phase is retried once after a short beat when it comes
- * back empty. Instant answers never depend on that luck.
+ * Public result pages sometimes serve a bot challenge instead of results, so the page engines are best-effort and the
+ * results phase is retried once after a short pause when it comes back empty.
  *
- * Selection: `web.searchProvider` is pinned to `keyless-http` in the profile
- * patch layer (cordis.patch.yml here), overriding the base bundle's
- * `deepseek-official`. To go back to the paid DeepSeek search, flip that pin.
- *
- * Same insertion contract as live-model-refresh.mjs: loaded via the patch
- * file's `insert` list with a relative `name`, imported as a file:// URL.
- * NAMED EXPORTS ONLY — no `default` (the loader's `unwrapExports` does
- * `exports.default ?? exports`, so a default export would hide `inject`).
- *
+ * Select it in the profile patch: `web.searchProvider: keyless-http`. Loaded through the patch file's `insert` list with a
+ * relative `name`. NAMED EXPORTS ONLY (the loader does `exports.default ?? exports`, so a default export would hide `inject`).
  * Self-contained: no package imports, only global fetch. Honours AbortSignal.
  */
 
@@ -44,10 +35,40 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
 const RETRY_BEAT_MS = 400
 const MAX_BODY_CHARS = 2_000_000 // a results page is a few hundred KB; anything past this is cut, not parsed
 
+/** The engines this plugin knows. `duckduckgo` and `bing` read public pages (no key); `brave` calls Brave's search API with your key. */
+export const ENGINES = ['duckduckgo', 'bing', 'brave']
+const DEFAULT_ENGINES = ['duckduckgo'] // Bing and Brave are opt-in: Bing scrapes a page its terms restrict, Brave needs a key
+const DEFAULT_BRAVE_KEY_ENV = 'BRAVE_SEARCH_API_KEY'
+
+/**
+ * Validate the plugin config and read the API key from the environment (never from the config text).
+ * Throws on a value it cannot use, so a typo is seen at start-up and not as silently missing results.
+ * @param {object|undefined} config `engines` (array of ENGINES, tried in order), `braveApiKeyEnv` (name of the env var holding the key)
+ * @param {Record<string, string|undefined>} env usually process.env
+ */
+export function parseOptions(config, env) {
+  const cfg = config !== null && typeof config === 'object' && !Array.isArray(config) ? config : {}
+  const engines = cfg.engines === undefined ? DEFAULT_ENGINES : cfg.engines
+  if (!Array.isArray(engines) || engines.length === 0 || engines.some((e) => !ENGINES.includes(e))) {
+    throw new Error('web-search-keyless: engines must be a non-empty list of ' + ENGINES.join(', ') + ', got ' + JSON.stringify(engines))
+  }
+  const braveApiKeyEnv = typeof cfg.braveApiKeyEnv === 'string' && cfg.braveApiKeyEnv.length > 0 ? cfg.braveApiKeyEnv : DEFAULT_BRAVE_KEY_ENV
+  const braveKey = env[braveApiKeyEnv] ?? ''
+  if (engines.includes('brave') && braveKey.length === 0) {
+    throw new Error('web-search-keyless: the brave engine needs an API key in the environment variable ' + braveApiKeyEnv)
+  }
+  return { engines: [...new Set(engines)], braveKey }
+}
+
 export class KeylessSearchProvider {
   id = PROVIDER_ID
 
-  /** No credentials to check — always usable. */
+  /** @param {{engines: string[], braveKey: string}} [options] from parseOptions; the default is DuckDuckGo only */
+  constructor(options = { engines: DEFAULT_ENGINES, braveKey: '' }) {
+    this.options = options
+  }
+
+  /** The engines need no login here (a missing key is refused at load), so it is always usable. */
   available() {
     return true
   }
@@ -63,22 +84,26 @@ export class KeylessSearchProvider {
     const sources = []
     const content = []
 
-    // 1) DuckDuckGo Instant Answer API (entities / instant answers).
-    try {
-      const ia = await this.#instantAnswer(query, signal)
-      if (ia !== null) {
-        if (ia.text !== undefined) content.push(ia.text)
-        for (const source of ia.sources) pushSource(sources, source)
+    // DuckDuckGo Instant Answer API (entities / instant answers), when the duckduckgo engine is on.
+    if (this.options.engines.includes('duckduckgo')) {
+      try {
+        const ia = await this.#instantAnswer(query, signal)
+        if (ia !== null) {
+          if (ia.text !== undefined) content.push(ia.text)
+          for (const source of ia.sources) pushSource(sources, source)
+        }
+      } catch {
+        // Non-fatal behind more capable result lists; nothing to surface.
       }
-    } catch {
-      // Non-fatal behind more capable result lists; nothing to surface.
     }
 
-    // 2 + 3) List engines, best-effort, retried once when a challenge wiped them.
-    const listEngines = [
-      (q, s) => this.#duckDuckGoHtml(q, s),
-      (q, s) => this.#bingHtml(q, s),
-    ]
+    // The list engines in the configured order, best-effort, retried once when a challenge wiped them.
+    const byName = {
+      duckduckgo: (q, s) => this.#duckDuckGoHtml(q, s),
+      bing: (q, s) => this.#bingHtml(q, s),
+      brave: (q, s) => this.#braveApi(q, s, limit),
+    }
+    const listEngines = this.options.engines.map((name) => byName[name])
     for (let attempt = 0; attempt < 2 && sources.length < limit; attempt++) {
       for (const engine of listEngines) {
         if (sources.length >= limit) break
@@ -173,6 +198,19 @@ export class KeylessSearchProvider {
     return sources
   }
 
+  /** Brave Search API (needs a key, sent in a header; a free tier exists). Official JSON, no page scraping. */
+  async #braveApi(query, signal, limit) {
+    const url = 'https://api.search.brave.com/res/v1/web/search?q=' + encodeURIComponent(query)
+      + '&count=' + Math.min(Math.max(limit, 1), BRAVE_MAX_COUNT)
+    const body = await httpGet(url, signal, {
+      'user-agent': 'dsh-web-search-keyless', 'accept': 'application/json', 'x-subscription-token': this.options.braveKey,
+    })
+    if (body.status !== 200) return []
+    let data
+    try { data = JSON.parse(body.text) } catch { return [] }
+    return parseBraveResults(data)
+  }
+
   async #bingHtml(query, signal) {
     const url = 'https://www.bing.com/search?q=' + encodeURIComponent(query) + '&setlang=en-US'
     const body = await httpGet(url, signal)
@@ -199,15 +237,33 @@ export class KeylessSearchProvider {
   }
 }
 
-/** Register the provider with the web seam. */
-export function apply(ctx) {
-  ctx.web.registerSearchProvider(new KeylessSearchProvider())
+/** Register the provider with the web seam. `config` is this plugin's block in the patch file (see parseOptions). */
+export function apply(ctx, config) {
+  ctx.web.registerSearchProvider(new KeylessSearchProvider(parseOptions(config, process.env)))
+}
+
+const BRAVE_MAX_COUNT = 20
+
+/** Brave's `web.results` as sources (title, url, snippet); items without an http(s) URL or a title are dropped. */
+export function parseBraveResults(data) {
+  const results = data?.web?.results
+  if (!Array.isArray(results)) return []
+  const sources = []
+  for (const item of results) {
+    if (item === null || typeof item !== 'object' || typeof item.url !== 'string' || !/^https?:\/\//i.test(item.url)) continue
+    const title = cleanText(item.title)
+    if (title.length === 0) continue
+    const snippet = cleanText(item.description)
+    sources.push({ url: item.url, title, snippet: snippet.length > 0 ? snippet.slice(0, MAX_SNIPPET) : undefined })
+    if (sources.length >= MAX_QUERIED) break
+  }
+  return sources
 }
 
 // --- shared HTTP + parsing helpers ------------------------------------------
 
-/** GET one public URL with a timeout; follows redirects; honours `signal`. */
-async function httpGet(url, signal) {
+/** GET one URL with a timeout; follows redirects; honours `signal`. `extraHeaders` (lower-case names) are added to, and win over, the page-reading defaults. */
+async function httpGet(url, signal, extraHeaders = {}) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(new Error('request timed out')), REQUEST_TIMEOUT_MS)
   const onOuterAbort = () => controller.abort(new Error('request aborted'))
@@ -215,7 +271,7 @@ async function httpGet(url, signal) {
   try {
     const response = await fetch(url, {
       redirect: 'follow',
-      headers: { 'user-agent': USER_AGENT, 'accept': 'text/html,application/xhtml+xml,application/json' },
+      headers: { 'user-agent': USER_AGENT, 'accept': 'text/html,application/xhtml+xml,application/json', ...extraHeaders },
       signal: controller.signal,
     })
     if (signal?.aborted) throw searchAborted()
