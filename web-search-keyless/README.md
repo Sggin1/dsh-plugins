@@ -8,7 +8,7 @@ It registers a provider (`keyless-http`) with several engines, chosen in the con
 |---|---|---|---|
 | `duckduckgo` | no | the DuckDuckGo Instant Answer API (a public JSON endpoint) and the DuckDuckGo HTML results page | **on** |
 | `bing` | no | the Bing HTML results page (scraping; **read the warning below**) | off |
-| `brave` | **yes** | the [Brave Search API](https://brave.com/search/api/) (an official API with a free tier, check their current plans) | off |
+| `brave` | **yes** | the [Brave Search API](https://brave.com/search/api/) (an official API with a key; plans, quotas and prices change, and a free plan may not be offered to new accounts, so check their current pricing) | off |
 
 Self-contained: no package imports, only the global `fetch`. It honours `AbortSignal`.
 
@@ -34,7 +34,7 @@ Restart DSH (the setting takes effect at the next start). To go back to the host
 
 ## The easy paid route: Brave Search API
 
-1. Get an API key from Brave's search API page and put it in an **environment variable** (never in the config file):
+1. Get an API key from Brave's search API page (read the plan's monthly quota and per-second limit first) and put it in an **environment variable** (never in the config file):
    `BRAVE_SEARCH_API_KEY=...` (or any name, set with `braveApiKeyEnv`).
 2. Put `brave` in the engine list. Listing it first means it is tried first and the others only fill in what is missing:
 
