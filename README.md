@@ -1,6 +1,7 @@
 # dsh-plugins
 
-Small plugins for DSH, written while running local model servers.
+Small plugins for [DSH (DeepSeek Harness)](https://github.com/deepseek-ai/deepseek-harness), written while running local model servers.
+These are independent community plugins, not part of DSH or affiliated with its authors.
 Each folder is one plugin with its own README and tests (`node --test <folder>/<name>.test.mjs`, Node 22).
 
 | Plugin | What it does |
