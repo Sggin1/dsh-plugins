@@ -68,13 +68,29 @@ export function sameProvider(have, want) {
     && have.models.length === 1 && sameThinking(found, model)
 }
 
+/** The poll interval in ms: the config value kept between one second and an hour, 10 s when it is missing or not a finite number. */
+export function pollInterval(value) {
+  const ms = Number(value)
+  return Number.isFinite(ms) && ms > 0 ? Math.min(Math.max(ms, 1000), 3_600_000) : 10_000
+}
+
 const positiveInt = (v) => Number.isInteger(v) && v > 0
 const isText = (v) => typeof v === 'string' && v.length > 0
 
 /** True when an entry from the endpoint has the fields a provider needs, with sane values (an http(s) base URL, positive limits). */
 export function validEntry(entry) {
   return isText(entry.displayName) && isText(entry.modelId) && isText(entry.baseURL) && /^https?:\/\//.test(entry.baseURL)
-    && positiveInt(entry.contextWindow) && positiveInt(entry.maxTokens)
+    && positiveInt(entry.contextWindow) && positiveInt(entry.maxTokens) && validOptionalFields(entry)
+}
+
+const INPUT_KINDS = ['text', 'image']
+
+/** The optional fields, when present, must have the expected shape: input kinds from a short list, effort levels as text or null, a short format name. */
+function validOptionalFields(entry) {
+  if (entry.input !== undefined && !(Array.isArray(entry.input) && entry.input.length > 0 && entry.input.every((k) => INPUT_KINDS.includes(k)))) return false
+  if (entry.thinkingFormat !== undefined && !(typeof entry.thinkingFormat === 'string' && entry.thinkingFormat.length <= 64)) return false
+  if (entry.reasoningEfforts === undefined) return true
+  return isObject(entry.reasoningEfforts) && Object.values(entry.reasoningEfforts).every((v) => v === null || (typeof v === 'string' && v.length <= 32))
 }
 
 /**
@@ -109,7 +125,7 @@ export function apply(ctx, config) {
   const cfg = isObject(config) ? config : {}
   const serveUrl = String(cfg.serveUrl || 'http://127.0.0.1:7070').replace(/\/$/, '')
   const apiKeyEnv = typeof cfg.apiKeyEnv === 'string' ? cfg.apiKeyEnv : ''
-  const POLL_MS = Number(cfg.pollMs) > 0 ? Number(cfg.pollMs) : 10000
+  const POLL_MS = pollInterval(cfg.pollMs)
   let polling = false
   let wasDown = false
 

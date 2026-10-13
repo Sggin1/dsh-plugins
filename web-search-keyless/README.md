@@ -36,7 +36,8 @@ Restart DSH (the setting takes effect at the next start). To go back to the host
 
 1. Get an API key from Brave's search API page (read the plan's monthly quota and per-second limit first) and put it in an **environment variable** (never in the config file):
    `BRAVE_SEARCH_API_KEY=...` (or any name, set with `braveApiKeyEnv`).
-2. Put `brave` in the engine list. Listing it first means it is tried first and the others only fill in what is missing:
+2. Put `brave` in the engine list. Engines run in the order listed, so with `brave` first the other engines only fill in what is missing
+   (when `duckduckgo` is listed, its Instant Answer is also added alongside the results):
 
 ```yaml
       config:
@@ -51,7 +52,9 @@ terms and pricing yourself.
 **When Brave cannot answer**, the model is told why instead of seeing an empty search: a rejected key (HTTP 401, 403 or 422), a rate
 limit or exhausted quota (429), or any other status produces a line such as `Search note: Brave rejected the request (HTTP 401) ...`
 when no engine returned results. A 429 is retried once after about a second, because plans often allow one request per second.
-Brave is never called twice for one search.
+Brave is called once per search, and a second time only after a 429. A page-engine retry never calls Brave again. The key must be plain
+visible characters (no spaces or control characters), otherwise the plugin refuses to load and does not print the value. The Brave
+request does not follow redirects, so the key header cannot be sent to another host.
 
 **A monthly cap of your own**, so a runaway agent cannot use up the plan:
 

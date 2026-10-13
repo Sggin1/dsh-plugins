@@ -2,7 +2,7 @@
 // Not loaded by DSH (cordis.patch.yml lists its plugins explicitly).
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { diffOps, providerFor, sameProvider, validEntry } from './serve-pull.mjs'
+import { diffOps, providerFor, sameProvider, validEntry, pollInterval } from './serve-pull.mjs'
 
 const entry = (over = {}) => ({
   key: 'serve-a-default', displayName: 'Qwen A', baseURL: 'http://127.0.0.1:8091/v1', modelId: 'models/q.gguf',
@@ -76,4 +76,23 @@ test('an empty list removes every serve- provider and nothing else', () => {
 
 test('non-object items in the list are skipped without throwing', () => {
   assert.deepEqual(diffOps({}, [null, 5, 'x', entry()], '').length, 1)
+})
+
+test('optional fields must have the expected shape or the entry is skipped', () => {
+  const bad = [
+    entry({ input: ['text', 'video'] }), entry({ input: [] }), entry({ input: 'text' }), entry({ thinkingFormat: 5 }),
+    entry({ thinkingFormat: 'x'.repeat(65) }), entry({ reasoningEfforts: 'high' }), entry({ reasoningEfforts: { low: { deep: 1 } } }),
+  ]
+  for (const e of bad) assert.equal(validEntry(e), false, JSON.stringify(e))
+  assert.equal(validEntry(entry({ input: ['text', 'image'], thinkingFormat: 'qwen-chat-template', reasoningEfforts: { off: null, low: 'low' } })), true)
+})
+
+test('the poll interval is kept between one second and an hour, and falls back to 10 s', () => {
+  assert.equal(pollInterval(undefined), 10000)
+  assert.equal(pollInterval('abc'), 10000)
+  assert.equal(pollInterval(Infinity), 10000)
+  assert.equal(pollInterval(-5), 10000)
+  assert.equal(pollInterval(1), 1000)
+  assert.equal(pollInterval(30000), 30000)
+  assert.equal(pollInterval(99999999999), 3600000)
 })

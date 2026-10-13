@@ -34,6 +34,7 @@ const MAX_QUERIED = 12
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
 const RETRY_BEAT_MS = 400
 const MAX_BODY_CHARS = 2_000_000 // a results page is a few hundred KB; anything past this is cut, not parsed
+const MAX_BODY_BYTES = 8_000_000 // a reply that declares more than this is not read at all
 
 /** The engines this plugin knows. `duckduckgo` and `bing` read public pages (no key); `brave` calls Brave's search API with your key. */
 export const ENGINES = ['duckduckgo', 'bing', 'brave']
@@ -53,9 +54,12 @@ export function parseOptions(config, env) {
     throw new Error('web-search-keyless: engines must be a non-empty list of ' + ENGINES.join(', ') + ', got ' + JSON.stringify(engines))
   }
   const braveApiKeyEnv = typeof cfg.braveApiKeyEnv === 'string' && cfg.braveApiKeyEnv.length > 0 ? cfg.braveApiKeyEnv : DEFAULT_BRAVE_KEY_ENV
-  const braveKey = env[braveApiKeyEnv] ?? ''
+  const braveKey = String(env[braveApiKeyEnv] ?? '').trim()
   if (engines.includes('brave') && braveKey.length === 0) {
     throw new Error('web-search-keyless: the brave engine needs an API key in the environment variable ' + braveApiKeyEnv)
+  }
+  if (engines.includes('brave') && !/^[\x21-\x7e]+$/.test(braveKey)) { // a key with spaces or control characters would also be refused by fetch, with the value in its message
+    throw new Error('web-search-keyless: the value of ' + braveApiKeyEnv + ' has characters that cannot be in an API key (the value is not shown)')
   }
   const cap = cfg.braveMonthlyCap
   if (cap !== undefined && (!Number.isInteger(cap) || cap < 1)) {
@@ -123,9 +127,11 @@ export class KeylessSearchProvider {
     await runEngines(this.options.engines)
     // Page engines sometimes serve a challenge instead of results: one more try after a short pause, only when nothing came back.
     // Brave is not retried here (its errors are not random, and a repeat call would spend quota and hit the 1-per-second limit).
-    if (sources.length === 0 && signal?.aborted !== true) {
-      await sleep(RETRY_BEAT_MS)
-      await runEngines(this.options.engines.filter((name) => name !== 'brave'))
+    const pageEngines = this.options.engines.filter((name) => name !== 'brave')
+    if (sources.length === 0 && pageEngines.length > 0 && signal?.aborted !== true) {
+      await sleep(RETRY_BEAT_MS, signal)
+      if (signal?.aborted) throw searchAborted()
+      await runEngines(pageEngines)
     }
     if (sources.length === 0 && notices.length > 0) content.push('Search note: ' + [...new Set(notices)].join(' '))
 
@@ -147,13 +153,13 @@ export class KeylessSearchProvider {
 
     const sources = []
     const collectTopic = (topic) => {
-      if (topic !== null && typeof topic === 'object' && typeof topic.FirstURL === 'string' && typeof topic.Text === 'string') {
-        sources.push({ url: topic.FirstURL, title: topic.Text.slice(0, 240) })
+      if (topic !== null && typeof topic === 'object' && solidUrl(topic.FirstURL) !== '' && typeof topic.Text === 'string') {
+        sources.push({ url: solidUrl(topic.FirstURL), title: topic.Text.slice(0, 240) })
       }
     }
-    if (typeof data.AbstractURL === 'string') {
+    if (solidUrl(data.AbstractURL) !== '') {
       sources.push({
-        url: data.AbstractURL,
+        url: solidUrl(data.AbstractURL),
         title: data.Heading || data.AbstractURL,
         snippet: typeof data.AbstractText === 'string' ? data.AbstractText.slice(0, MAX_SNIPPET) : undefined,
       })
@@ -211,7 +217,7 @@ export class KeylessSearchProvider {
     return sources
   }
 
-  /** Brave Search API (needs a key, sent in a header; a free tier exists). Official JSON, no page scraping. */
+  /** Brave Search API (needs a key, sent in a header). Official JSON, no page scraping. */
   async #braveApi(query, signal, limit) {
     const cap = this.options.braveMonthlyCap
     if (cap !== undefined && this.quota !== undefined && Date.now() < this.quota.resetAt && this.quota.used >= cap) {
@@ -220,10 +226,10 @@ export class KeylessSearchProvider {
     const url = 'https://api.search.brave.com/res/v1/web/search?q=' + encodeURIComponent(query)
       + '&count=' + Math.min(Math.max(limit, 1), BRAVE_MAX_COUNT)
     const headers = { 'user-agent': 'dsh-web-search-keyless', 'accept': 'application/json', 'x-subscription-token': this.options.braveKey }
-    let body = await httpGet(url, signal, headers)
+    let body = await httpGet(url, signal, headers, 'error') // never follow a redirect: the key header would go with it
     if (body.status === 429) { // the 1-per-second limit is the usual cause: wait a moment and try once more
-      await sleep(BRAVE_RETRY_MS)
-      body = await httpGet(url, signal, headers)
+      await sleep(BRAVE_RETRY_MS, signal)
+      body = await httpGet(url, signal, headers, 'error')
     }
     this.#rememberQuota(body.headers)
     if (body.status === 401 || body.status === 403 || body.status === 422) {
@@ -275,6 +281,7 @@ export function apply(ctx, config) {
 
 const BRAVE_MAX_COUNT = 20
 const BRAVE_RETRY_MS = 1100
+const MAX_RESET_SECONDS = 35 * 24 * 3600 // a quota window is about a month; a larger value from a reply is not believed
 
 /** A message meant for the model or the user (a keyed engine saying why it gave nothing), as opposed to a quiet failure of a page scraper. */
 class SearchNotice extends Error {}
@@ -285,12 +292,12 @@ class SearchNotice extends Error {}
  * in which case no cap is enforced (the plan's own limit still applies). Brave's count can lag by a request.
  */
 export function parseQuota(headers) {
-  const pair = (name) => String(headers?.get?.(name) ?? '').split(',').map((v) => Number.parseInt(v.trim(), 10))
+  const pair = (name) => String(headers?.get?.(name) ?? '').split(',').map((v) => (/^\s*\d{1,9}\s*$/.test(v) ? Number.parseInt(v, 10) : Number.NaN))
   const [limit, remaining, reset] = ['x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset'].map(pair)
   if (limit.length !== 2 || remaining.length !== 2 || reset.length !== 2) return null
   const values = [limit[1], remaining[1], reset[1]]
   if (values.some((v) => !Number.isInteger(v) || v < 0) || remaining[1] > limit[1]) return null
-  return { used: limit[1] - remaining[1], resetSeconds: reset[1] }
+  return { used: limit[1] - remaining[1], resetSeconds: Math.min(reset[1], MAX_RESET_SECONDS) }
 }
 
 /** Brave's `web.results` as sources (title, url, snippet); items without an http(s) URL or a title are dropped. */
@@ -312,25 +319,28 @@ export function parseBraveResults(data) {
 // --- shared HTTP + parsing helpers ------------------------------------------
 
 /** GET one URL with a timeout; follows redirects; honours `signal`. `extraHeaders` (lower-case names) are added to, and win over, the page-reading defaults. */
-async function httpGet(url, signal, extraHeaders = {}) {
+async function httpGet(url, signal, extraHeaders = {}, redirect = 'follow') {
+  if (signal?.aborted) throw searchAborted()
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(new Error('request timed out')), REQUEST_TIMEOUT_MS)
   const onOuterAbort = () => controller.abort(new Error('request aborted'))
   signal?.addEventListener('abort', onOuterAbort, { once: true })
   try {
     const response = await fetch(url, {
-      redirect: 'follow',
+      redirect,
       headers: { 'user-agent': USER_AGENT, 'accept': 'text/html,application/xhtml+xml,application/json', ...extraHeaders },
       signal: controller.signal,
     })
     if (signal?.aborted) throw searchAborted()
     if (REDIRECT_STATUSES.has(response.status)) return { status: response.status, text: '', headers: response.headers }
+    if (Number(response.headers.get('content-length')) > MAX_BODY_BYTES) return { status: response.status, text: '', headers: response.headers }
     const text = (await response.text()).slice(0, MAX_BODY_CHARS)
     return { status: response.status, text, headers: response.headers }
   } catch (error) {
     if (signal?.aborted || (controller.signal.aborted && !signal?.aborted)) throw searchAborted()
     if (error?.name === 'AbortError') throw searchAborted()
-    throw new Error('keyless search request failed: ' + String(error))
+    // Only the error's name and code, never its message: a message can quote a request header (and so an API key).
+    throw new Error('keyless search request failed: ' + (error?.name ?? 'Error') + (error?.cause?.code ? ' ' + error.cause.code : ''))
   } finally {
     clearTimeout(timer)
     signal?.removeEventListener('abort', onOuterAbort)
@@ -343,8 +353,11 @@ function searchAborted() {
 }
 
 /** Simple async delay that respects cancellation. */
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+function sleep(ms, signal) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms)
+    signal?.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
+  })
 }
 
 /** A protocol-relative or absolute http(s) URL, else ''. */
@@ -417,7 +430,7 @@ export function numericEntity(digits) {
 /** Drop tags and entities, collapse whitespace. */
 export function cleanText(html) {
   return String(html ?? '')
-    .replace(/<[^>]*>/g, ' ')
+    .replace(/<[^<>]*>/g, ' ')
     .replace(/&#(x[0-9a-fA-F]{1,6}|[0-9]{1,7});?/g, (_, digits) => numericEntity(digits))
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')

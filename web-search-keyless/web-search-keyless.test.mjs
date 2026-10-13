@@ -188,3 +188,81 @@ test('with the cap reached, the next engine in the list still answers and no cap
     globalThis.fetch = realFetch
   }
 })
+
+// --- hardening from the second review ---
+
+test('Instant Answer links that are not http(s) are dropped, and an empty AbstractURL makes no source', async () => {
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('api.duckduckgo.com')) {
+      return new Response(JSON.stringify({
+        AbstractURL: 'javascript:alert(1)', Heading: 'bad',
+        RelatedTopics: [{ FirstURL: 'file:///etc/passwd', Text: 'bad' }, { FirstURL: 'https://ok.example/a', Text: 'good' }],
+      }), { status: 200 })
+    }
+    return new Response('', { status: 200 })
+  }
+  try {
+    const result = await new KeylessSearchProvider({ engines: ['duckduckgo'], braveKey: '' }).search({ query: 'q', maxResults: 10 }, undefined)
+    assert.deepEqual(result.sources.map((s) => s.url), ['https://ok.example/a'])
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test('an API key with spaces or control characters is refused at load, and the message does not show it', () => {
+  for (const bad of ['abc def', 'abc\ndef', 'abc\u0007def', 'café']) {
+    let message = ''
+    try { parseOptions({ engines: ['brave'] }, { BRAVE_SEARCH_API_KEY: bad }) } catch (error) { message = error.message }
+    assert.match(message, /cannot be in an API key/)
+    assert.ok(!message.includes(bad), 'the key must not appear in the message')
+  }
+  assert.equal(parseOptions({ engines: ['brave'] }, { BRAVE_SEARCH_API_KEY: '  good-key_123  ' }).braveKey, 'good-key_123')
+})
+
+test('the Brave request refuses redirects, so the key header cannot follow one', async () => {
+  const realFetch = globalThis.fetch
+  let redirectMode
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('api.search.brave.com')) redirectMode = init.redirect
+    return new Response(JSON.stringify(braveBody), { status: 200 })
+  }
+  try {
+    await new KeylessSearchProvider({ engines: ['brave'], braveKey: 'K' }).search({ query: 'q', maxResults: 10 }, undefined)
+    assert.equal(redirectMode, 'error')
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test('an aborted signal sends no request at all', async () => {
+  const realFetch = globalThis.fetch
+  let calls = 0
+  globalThis.fetch = async () => { calls += 1; return new Response('{}', { status: 200 }) }
+  try {
+    const controller = new AbortController()
+    controller.abort()
+    await assert.rejects(new KeylessSearchProvider({ engines: ['brave', 'duckduckgo'], braveKey: 'K' }).search({ query: 'q' }, controller.signal))
+    assert.equal(calls, 0)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test('with only brave listed, an empty answer does not wait for a pointless page-engine retry', async () => {
+  const started = Date.now()
+  await braveSearch({ engines: ['brave'] }, [[401, {}, {}]])
+  assert.ok(Date.now() - started < 300, 'took ' + (Date.now() - started) + ' ms')
+})
+
+test('parseQuota refuses numbers with trailing text and clamps a huge reset to about a month', () => {
+  const headers = (o) => new Headers(o)
+  assert.equal(parseQuota(headers({ ...quotaHeaders(0), 'x-ratelimit-remaining': '1, 5abc' })), null)
+  assert.equal(parseQuota(headers({ ...quotaHeaders(0), 'x-ratelimit-reset': '1, 99999999' })).resetSeconds, 35 * 24 * 3600)
+})
+
+test('cleanText stays fast on a long run of "<" with no closing ">"', () => {
+  const started = Date.now()
+  cleanText('<'.repeat(200000))
+  assert.ok(Date.now() - started < 1000, 'took ' + (Date.now() - started) + ' ms')
+})

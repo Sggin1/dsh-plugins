@@ -37,7 +37,10 @@ enforces: if it is larger, DSH can send requests the server rejects.
   An endpoint that cannot be reached changes nothing.
 - It sends whatever base URL the endpoint gives to DSH as a provider, and DSH then sends prompts there. **Only point `serveUrl` at an
   endpoint you trust.** Redirects are followed by `fetch`'s default behaviour.
-- Bad config values fall back to the defaults (`serveUrl` `http://127.0.0.1:7070`, `pollMs` 10000); they do not throw.
+- Bad config values fall back to the defaults (`serveUrl` `http://127.0.0.1:7070`, `pollMs` 10000); they do not throw. `pollMs` is kept
+  between 1000 (one second) and 3600000 (one hour).
+- Optional entry fields are checked too: `input` may only list `text` and `image`, `thinkingFormat` must be a short string, and
+  `reasoningEfforts` values must be short strings or null. An entry that fails any check is skipped.
 
 ## Config
 
