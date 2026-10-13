@@ -2,7 +2,7 @@
 // Not loaded by DSH (cordis.patch.yml lists its plugins explicitly).
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { diffOps, providerFor, sameProvider } from './serve-pull.mjs'
+import { diffOps, providerFor, sameProvider, validEntry } from './serve-pull.mjs'
 
 const entry = (over = {}) => ({
   key: 'serve-a-default', displayName: 'Qwen A', baseURL: 'http://127.0.0.1:8091/v1', modelId: 'models/q.gguf',
@@ -50,4 +50,30 @@ test('a thinking model carries the switch and format; turning it on later update
   const old = { ...providerFor(entry(), 'K'), displayName: 'Qwen A  [up]' }
   assert.equal(sameProvider(old, want), false)
   assert.ok(diffOps({ 'serve-a-default': old }, [think], 'K').length > 0)
+})
+
+test('an entry with a bad base URL, missing model id or non-positive limits is not written', () => {
+  const bad = [
+    entry({ baseURL: 'file:///etc/passwd' }), entry({ baseURL: 'javascript:alert(1)' }), entry({ modelId: '' }),
+    entry({ contextWindow: 0 }), entry({ maxTokens: -5 }), entry({ contextWindow: '32768' }), entry({ displayName: undefined }),
+  ]
+  for (const e of bad) {
+    assert.equal(validEntry(e), false)
+    assert.deepEqual(diffOps({}, [e], ''), [])
+  }
+  assert.equal(validEntry(entry()), true)
+})
+
+test('an invalid entry for a server that already has a provider leaves that provider in place (it is not removed)', () => {
+  const providers = { 'serve-a-default': providerFor(entry(), '') }
+  assert.deepEqual(diffOps(providers, [entry({ baseURL: 'ftp://nope' })], ''), [])
+})
+
+test('an empty list removes every serve- provider and nothing else', () => {
+  const providers = { 'serve-a-default': providerFor(entry(), ''), openrouter: {} }
+  assert.deepEqual(diffOps(providers, [], ''), [{ op: 'unset', path: ['providers', 'serve-a-default'] }])
+})
+
+test('non-object items in the list are skipped without throwing', () => {
+  assert.deepEqual(diffOps({}, [null, 5, 'x', entry()], '').length, 1)
 })

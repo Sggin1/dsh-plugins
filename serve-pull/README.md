@@ -28,6 +28,17 @@ Every `pollMs` (default 10 s) the plugin asks the control plane which servers ar
 `reasoningEfforts` and `thinkingFormat` are optional (a model that thinks). `contextWindow` should be the limit the server really
 enforces: if it is larger, DSH can send requests the server rejects.
 
+## What it checks, and what it trusts
+
+- An entry is only written if it has a display name, a model id, an `http://` or `https://` base URL, and positive whole-number
+  `contextWindow` and `maxTokens`. An invalid entry is skipped, and a provider that already exists under its key is left as it is.
+- A response bigger than 1 MB, a non-JSON body, or a body without an `entries` list changes nothing.
+- **An empty list (`"entries": []` from a healthy endpoint) removes every `serve-*` provider.** That is how a stopped server disappears.
+  An endpoint that cannot be reached changes nothing.
+- It sends whatever base URL the endpoint gives to DSH as a provider, and DSH then sends prompts there. **Only point `serveUrl` at an
+  endpoint you trust.** Redirects are followed by `fetch`'s default behaviour.
+- Bad config values fall back to the defaults (`serveUrl` `http://127.0.0.1:7070`, `pollMs` 10000); they do not throw.
+
 ## Config
 
 ```yaml

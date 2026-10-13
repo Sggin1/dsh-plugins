@@ -23,6 +23,7 @@ export const inject = ['settings', 'timer']
 const NS = 'llm-pi-ai'
 const PREFIX = 'serve-'
 const MARKER = /\s*\[(?:up|down)\]\s*$/
+const MAX_BODY_BYTES = 1_000_000 // a list of running servers is a few KB; refuse anything far bigger
 
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 
@@ -67,6 +68,15 @@ export function sameProvider(have, want) {
     && have.models.length === 1 && sameThinking(found, model)
 }
 
+const positiveInt = (v) => Number.isInteger(v) && v > 0
+const isText = (v) => typeof v === 'string' && v.length > 0
+
+/** True when an entry from the endpoint has the fields a provider needs, with sane values (an http(s) base URL, positive limits). */
+export function validEntry(entry) {
+  return isText(entry.displayName) && isText(entry.modelId) && isText(entry.baseURL) && /^https?:\/\//.test(entry.baseURL)
+    && positiveInt(entry.contextWindow) && positiveInt(entry.maxTokens)
+}
+
 /**
  * The settings operations that make the `serve-` providers match Serve's list.
  * @param {Record<string, unknown>} providers the current llm-pi-ai providers
@@ -76,9 +86,10 @@ export function diffOps(providers, entries, apiKeyEnv) {
   const ops = []
   const wanted = new Set()
   for (const entry of entries) {
-    const key = entry.key
+    const key = isObject(entry) ? entry.key : undefined
     if (typeof key !== 'string' || !key.startsWith(PREFIX)) continue
-    wanted.add(key)
+    wanted.add(key) // an invalid entry keeps whatever provider already exists under its key, it is just not written
+    if (!validEntry(entry)) continue
     const want = providerFor(entry, apiKeyEnv)
     const have = providers[key]
     if (sameProvider(have, want)) continue
@@ -113,8 +124,11 @@ export function apply(ctx, config) {
     try {
       const response = await fetch(serveUrl + '/api/harness/dsh', { signal: AbortSignal.timeout(4000) })
       if (!response.ok) return undefined
-      const body = await response.json()
-      return Array.isArray(body.entries) ? body.entries : undefined
+      if (Number(response.headers.get('content-length')) > MAX_BODY_BYTES) return undefined
+      const text = await response.text()
+      if (text.length > MAX_BODY_BYTES) return undefined
+      const body = JSON.parse(text)
+      return isObject(body) && Array.isArray(body.entries) ? body.entries : undefined
     } catch (error) {
       if (!wasDown) console.log('serve-pull: Serve not answering (' + (error && error.message) + '); leaving providers as they are')
       wasDown = true

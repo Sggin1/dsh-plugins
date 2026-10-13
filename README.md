@@ -15,8 +15,12 @@ Each folder is one plugin with its own README and tests (`node --test <folder>/<
 2. Add an `insert` block for it to `cordis.patch.yml` (each plugin's README has a copy-paste example).
 3. Restart DSH.
 
-Both plugins use named exports only (the loader does `exports.default ?? exports`), fail loudly on bad config, and can be removed
-by deleting their block from the config.
+All three plugins use named exports only (the loader does `exports.default ?? exports`) and can be removed by deleting their block
+from the config. On bad config, `tool-call-flood-guard` throws at load; `serve-pull` falls back to its defaults and skips entries it
+cannot use, and `web-search-keyless` has no config.
+
+"serve" in `serve-pull` is the author's own local control plane for LLM inference servers; it is not published. The plugin only needs
+an endpoint that returns the JSON shape described in its README, so it works with anything that provides one.
 
 ## Status
 

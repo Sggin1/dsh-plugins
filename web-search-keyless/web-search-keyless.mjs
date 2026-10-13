@@ -42,6 +42,7 @@ const MAX_SNIPPET = 320
 const MAX_QUERIED = 12
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
 const RETRY_BEAT_MS = 400
+const MAX_BODY_CHARS = 2_000_000 // a results page is a few hundred KB; anything past this is cut, not parsed
 
 export class KeylessSearchProvider {
   id = PROVIDER_ID
@@ -219,7 +220,7 @@ async function httpGet(url, signal) {
     })
     if (signal?.aborted) throw searchAborted()
     if (REDIRECT_STATUSES.has(response.status)) return { status: response.status, text: '' }
-    const text = await response.text()
+    const text = (await response.text()).slice(0, MAX_BODY_CHARS)
     return { status: response.status, text }
   } catch (error) {
     if (signal?.aborted || (controller.signal.aborted && !signal?.aborted)) throw searchAborted()
@@ -301,11 +302,18 @@ function pushSource(arr, source) {
   arr.push(source)
 }
 
+/** One numeric character reference (`65`, `x41`, `X41`) as text; a value that is not a valid code point becomes a space. */
+export function numericEntity(digits) {
+  const hex = digits[0] === 'x' || digits[0] === 'X'
+  const code = Number.parseInt(hex ? digits.slice(1) : digits, hex ? 16 : 10)
+  return Number.isInteger(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : ' '
+}
+
 /** Drop tags and entities, collapse whitespace. */
 export function cleanText(html) {
   return String(html ?? '')
     .replace(/<[^>]*>/g, ' ')
-    .replace(/&#(x?[0-9a-fA-F]{1,6});?/g, (_, digits) => String.fromCodePoint(Number.parseInt(digits, digits[0].toLowerCase() === 'x' ? 16 : 10)))
+    .replace(/&#(x[0-9a-fA-F]{1,6}|[0-9]{1,7});?/g, (_, digits) => numericEntity(digits))
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
