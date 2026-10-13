@@ -22,6 +22,10 @@ cannot use, and `web-search-keyless` throws at load on an unknown engine or a mi
 "serve" in `serve-pull` is the author's own local control plane for LLM inference servers; it is not published. The plugin only needs
 an endpoint that returns the JSON shape described in its README, so it works with anything that provides one.
 
+## Questions, bugs and security
+
+Questions and bug reports: open an issue. For a security problem, see [SECURITY.md](SECURITY.md) and report it privately.
+
 ## Status
 
 Written for a personal setup and shared as is. Tested with the unit tests in each folder; not tested against every DSH version.
