@@ -46,7 +46,29 @@ Restart DSH (the setting takes effect at the next start). To go back to the host
 
 If `brave` is listed and the variable is empty, the plugin throws at start-up, so you see the mistake at once. The key is sent in a
 request header, not in the URL, and the requests carry an honest `User-Agent` (`dsh-web-search-keyless`). Check Brave's current
-terms and pricing yourself. The plugin is tested against a stubbed response, not against the live API.
+terms and pricing yourself.
+
+**When Brave cannot answer**, the model is told why instead of seeing an empty search: a rejected key (HTTP 401, 403 or 422), a rate
+limit or exhausted quota (429), or any other status produces a line such as `Search note: Brave rejected the request (HTTP 401) ...`
+when no engine returned results. A 429 is retried once after about a second, because plans often allow one request per second.
+Brave is never called twice for one search.
+
+**A monthly cap of your own**, so a runaway agent cannot use up the plan:
+
+```yaml
+      config:
+        engines: [brave, duckduckgo]
+        braveMonthlyCap: 250      # optional; stop using Brave once this many searches are used this month
+```
+
+The cap uses the usage Brave reports in its rate-limit headers (two values each, "per second, per month"), so there is no counter file
+and a restart simply learns the usage again from the next reply. Brave's count can lag by a request, so the cap is approximate. When
+the cap is reached, Brave is skipped until the quota window resets and the next engine in your list answers; the note about the cap is
+shown only when nothing else produced results. If the headers are missing or in another shape, no cap is enforced (the plan's own
+limit still applies). Raise or remove `braveMonthlyCap` at any time.
+
+The plugin's tests use a stubbed `fetch`. It was also run once against the live API with a real key (the header format above comes from
+that run); nothing in the test suite spends quota.
 
 ## Turning Bing on (opt-in), and why it is off
 

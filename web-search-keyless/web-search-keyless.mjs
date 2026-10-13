@@ -57,7 +57,11 @@ export function parseOptions(config, env) {
   if (engines.includes('brave') && braveKey.length === 0) {
     throw new Error('web-search-keyless: the brave engine needs an API key in the environment variable ' + braveApiKeyEnv)
   }
-  return { engines: [...new Set(engines)], braveKey }
+  const cap = cfg.braveMonthlyCap
+  if (cap !== undefined && (!Number.isInteger(cap) || cap < 1)) {
+    throw new Error('web-search-keyless: braveMonthlyCap must be a whole number >= 1, got ' + JSON.stringify(cap))
+  }
+  return { engines: [...new Set(engines)], braveKey, braveMonthlyCap: cap }
 }
 
 export class KeylessSearchProvider {
@@ -103,18 +107,27 @@ export class KeylessSearchProvider {
       bing: (q, s) => this.#bingHtml(q, s),
       brave: (q, s) => this.#braveApi(q, s, limit),
     }
-    const listEngines = this.options.engines.map((name) => byName[name])
-    for (let attempt = 0; attempt < 2 && sources.length < limit; attempt++) {
-      for (const engine of listEngines) {
+    const notices = []
+    const runEngines = async (names) => {
+      for (const name of names) {
         if (sources.length >= limit) break
         try {
-          for (const source of await engine(query, signal)) pushSource(sources, source)
-        } catch {
-          // Non-fatal per engine.
+          for (const source of await byName[name](query, signal)) pushSource(sources, source)
+        } catch (error) {
+          if (error instanceof SearchNotice) notices.push(error.message) // a keyed engine says why it gave nothing
+          else if (signal?.aborted) throw searchAborted()
+          // any other failure of one engine is non-fatal
         }
       }
-      if (attempt === 0 && sources.length === 0 && signal?.aborted !== true) await sleep(RETRY_BEAT_MS)
     }
+    await runEngines(this.options.engines)
+    // Page engines sometimes serve a challenge instead of results: one more try after a short pause, only when nothing came back.
+    // Brave is not retried here (its errors are not random, and a repeat call would spend quota and hit the 1-per-second limit).
+    if (sources.length === 0 && signal?.aborted !== true) {
+      await sleep(RETRY_BEAT_MS)
+      await runEngines(this.options.engines.filter((name) => name !== 'brave'))
+    }
+    if (sources.length === 0 && notices.length > 0) content.push('Search note: ' + [...new Set(notices)].join(' '))
 
     const out = sources.slice(0, limit)
     return {
@@ -200,15 +213,33 @@ export class KeylessSearchProvider {
 
   /** Brave Search API (needs a key, sent in a header; a free tier exists). Official JSON, no page scraping. */
   async #braveApi(query, signal, limit) {
+    const cap = this.options.braveMonthlyCap
+    if (cap !== undefined && this.quota !== undefined && Date.now() < this.quota.resetAt && this.quota.used >= cap) {
+      throw new SearchNotice('Brave is paused: this month\'s cap of ' + cap + ' searches is used up (it resumes when the quota window resets).')
+    }
     const url = 'https://api.search.brave.com/res/v1/web/search?q=' + encodeURIComponent(query)
       + '&count=' + Math.min(Math.max(limit, 1), BRAVE_MAX_COUNT)
-    const body = await httpGet(url, signal, {
-      'user-agent': 'dsh-web-search-keyless', 'accept': 'application/json', 'x-subscription-token': this.options.braveKey,
-    })
-    if (body.status !== 200) return []
+    const headers = { 'user-agent': 'dsh-web-search-keyless', 'accept': 'application/json', 'x-subscription-token': this.options.braveKey }
+    let body = await httpGet(url, signal, headers)
+    if (body.status === 429) { // the 1-per-second limit is the usual cause: wait a moment and try once more
+      await sleep(BRAVE_RETRY_MS)
+      body = await httpGet(url, signal, headers)
+    }
+    this.#rememberQuota(body.headers)
+    if (body.status === 401 || body.status === 403 || body.status === 422) {
+      throw new SearchNotice('Brave rejected the request (HTTP ' + body.status + '): check the API key and that the plan allows web search.')
+    }
+    if (body.status === 429) throw new SearchNotice('Brave rate limit or monthly quota reached (HTTP 429); try again later.')
+    if (body.status !== 200) throw new SearchNotice('Brave answered HTTP ' + body.status + ' and gave no results.')
     let data
     try { data = JSON.parse(body.text) } catch { return [] }
     return parseBraveResults(data)
+  }
+
+  /** Keep the monthly usage Brave reports, so the cap can be enforced without a counter file (a restart just re-learns it from the next reply). */
+  #rememberQuota(headers) {
+    const quota = parseQuota(headers)
+    if (quota !== null) this.quota = { used: quota.used, resetAt: Date.now() + quota.resetSeconds * 1000 }
   }
 
   async #bingHtml(query, signal) {
@@ -243,6 +274,24 @@ export function apply(ctx, config) {
 }
 
 const BRAVE_MAX_COUNT = 20
+const BRAVE_RETRY_MS = 1100
+
+/** A message meant for the model or the user (a keyed engine saying why it gave nothing), as opposed to a quiet failure of a page scraper. */
+class SearchNotice extends Error {}
+
+/**
+ * The monthly usage from Brave's rate-limit headers. They carry two values each, "per-second, per-month" (for example
+ * `x-ratelimit-limit: 1, 2000`); this reads the second. Returns null when the headers are missing or not in that shape,
+ * in which case no cap is enforced (the plan's own limit still applies). Brave's count can lag by a request.
+ */
+export function parseQuota(headers) {
+  const pair = (name) => String(headers?.get?.(name) ?? '').split(',').map((v) => Number.parseInt(v.trim(), 10))
+  const [limit, remaining, reset] = ['x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset'].map(pair)
+  if (limit.length !== 2 || remaining.length !== 2 || reset.length !== 2) return null
+  const values = [limit[1], remaining[1], reset[1]]
+  if (values.some((v) => !Number.isInteger(v) || v < 0) || remaining[1] > limit[1]) return null
+  return { used: limit[1] - remaining[1], resetSeconds: reset[1] }
+}
 
 /** Brave's `web.results` as sources (title, url, snippet); items without an http(s) URL or a title are dropped. */
 export function parseBraveResults(data) {
@@ -275,9 +324,9 @@ async function httpGet(url, signal, extraHeaders = {}) {
       signal: controller.signal,
     })
     if (signal?.aborted) throw searchAborted()
-    if (REDIRECT_STATUSES.has(response.status)) return { status: response.status, text: '' }
+    if (REDIRECT_STATUSES.has(response.status)) return { status: response.status, text: '', headers: response.headers }
     const text = (await response.text()).slice(0, MAX_BODY_CHARS)
-    return { status: response.status, text }
+    return { status: response.status, text, headers: response.headers }
   } catch (error) {
     if (signal?.aborted || (controller.signal.aborted && !signal?.aborted)) throw searchAborted()
     if (error?.name === 'AbortError') throw searchAborted()

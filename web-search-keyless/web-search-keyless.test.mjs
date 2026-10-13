@@ -2,7 +2,7 @@
 // (No network: the search itself is not exercised here.)
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { cleanText, numericEntity, parseOptions, parseBraveResults, KeylessSearchProvider } from './web-search-keyless.mjs'
+import { cleanText, numericEntity, parseOptions, parseBraveResults, parseQuota, KeylessSearchProvider } from './web-search-keyless.mjs'
 
 test('numeric character references decode in decimal and hex, either case of x', () => {
   assert.equal(numericEntity('65'), 'A')
@@ -90,4 +90,101 @@ test('brave is called with the key in a header (not in the URL) and an honest us
   assert.equal(call.headers['user-agent'], 'dsh-web-search-keyless')
   assert.ok(!call.url.includes('SECRET-KEY'))
   assert.equal(result.sources[0].url, 'https://t.example')
+})
+
+// --- Brave: errors the model can see, one retry on 429, and the monthly cap ---
+
+const braveBody = { web: { results: [{ title: 'T', url: 'https://t.example', description: 'd' }] } }
+const quotaHeaders = (used, resetSeconds = 100, limit = 2000) => ({
+  'x-ratelimit-limit': '1, ' + limit, 'x-ratelimit-remaining': '1, ' + (limit - used), 'x-ratelimit-reset': '1, ' + resetSeconds,
+})
+
+/** Search with a scripted fetch: `replies` is a list of [status, body, headers] used in order for brave calls; others get {}. */
+async function braveSearch(options, replies, searches = 1, query = 'q') {
+  const queue = [...replies]
+  const braveCalls = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    if (!String(url).includes('api.search.brave.com')) return new Response('{}', { status: 200 })
+    braveCalls.push(String(url))
+    const [status, body, headers] = queue.length > 1 ? queue.shift() : queue[0]
+    return new Response(JSON.stringify(body), { status, headers })
+  }
+  try {
+    const provider = new KeylessSearchProvider({ braveKey: 'K', ...options })
+    let result
+    for (let i = 0; i < searches; i++) result = await provider.search({ query, maxResults: 10 }, undefined)
+    return { result, braveCalls }
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}
+
+test('parseQuota reads the monthly numbers from the two-value headers and refuses anything else', () => {
+  const headers = (o) => new Headers(o)
+  assert.deepEqual(parseQuota(headers(quotaHeaders(250, 1637172))), { used: 250, resetSeconds: 1637172 })
+  assert.equal(parseQuota(headers({})), null)
+  assert.equal(parseQuota(headers({ 'x-ratelimit-limit': '2000', 'x-ratelimit-remaining': '1999', 'x-ratelimit-reset': '5' })), null)
+  assert.equal(parseQuota(headers({ ...quotaHeaders(0), 'x-ratelimit-remaining': '1, 99999' })), null)
+  assert.equal(parseQuota(undefined), null)
+})
+
+test('braveMonthlyCap must be a whole number of at least 1', () => {
+  assert.equal(parseOptions({ engines: ['brave'], braveMonthlyCap: 250 }, { BRAVE_SEARCH_API_KEY: 'k' }).braveMonthlyCap, 250)
+  assert.equal(parseOptions({}, {}).braveMonthlyCap, undefined)
+  for (const bad of [0, -1, 2.5, '250', null]) assert.throws(() => parseOptions({ braveMonthlyCap: bad }, {}), /braveMonthlyCap/)
+})
+
+test('a rejected key gives no results and a note the model can read', async () => {
+  const { result } = await braveSearch({ engines: ['brave'] }, [[401, {}, {}]])
+  assert.equal(result.sources.length, 0)
+  assert.match(result.content, /Search note: Brave rejected the request \(HTTP 401\)/)
+})
+
+test('a 429 is retried once, and a second 429 is reported (not silent)', async () => {
+  const ok = await braveSearch({ engines: ['brave'] }, [[429, {}, {}], [200, braveBody, {}]])
+  assert.equal(ok.braveCalls.length, 2)
+  assert.equal(ok.result.sources.length, 1)
+  const failed = await braveSearch({ engines: ['brave'] }, [[429, {}, {}]])
+  assert.equal(failed.braveCalls.length, 2)
+  assert.match(failed.result.content, /rate limit or monthly quota/)
+})
+
+test('brave returning fewer results than asked for is not called a second time', async () => {
+  const { braveCalls } = await braveSearch({ engines: ['brave'] }, [[200, braveBody, {}]])
+  assert.equal(braveCalls.length, 1)
+})
+
+test('the monthly cap pauses brave once the reported usage reaches it, and says so when nothing else answers', async () => {
+  const first = await braveSearch({ engines: ['brave'], braveMonthlyCap: 250 }, [[200, braveBody, quotaHeaders(250)]], 2)
+  assert.equal(first.braveCalls.length, 1, 'the second search must not call brave')
+  assert.match(first.result.content, /this month's cap of 250/)
+  const under = await braveSearch({ engines: ['brave'], braveMonthlyCap: 250 }, [[200, braveBody, quotaHeaders(100)]], 2)
+  assert.equal(under.braveCalls.length, 2)
+})
+
+test('with the cap reached, the next engine in the list still answers and no cap note is shown', async () => {
+  const realFetch = globalThis.fetch
+  const braveCalls = []
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    if (u.includes('api.search.brave.com')) {
+      braveCalls.push(u)
+      return new Response(JSON.stringify(braveBody), { status: 200, headers: quotaHeaders(5) })
+    }
+    if (u.includes('api.duckduckgo.com')) {
+      return new Response(JSON.stringify({ AbstractURL: 'https://d.example/page', Heading: 'D page', AbstractText: 'about d' }), { status: 200 })
+    }
+    return new Response('', { status: 200 })
+  }
+  try {
+    const provider = new KeylessSearchProvider({ engines: ['brave', 'duckduckgo'], braveKey: 'K', braveMonthlyCap: 1 })
+    await provider.search({ query: 'q', maxResults: 10 }, undefined) // learns the usage (5 >= cap 1)
+    const second = await provider.search({ query: 'q2', maxResults: 10 }, undefined)
+    assert.equal(braveCalls.length, 1, 'brave must not be called again once the cap is reached')
+    assert.ok(second.sources.some((x) => x.url === 'https://d.example/page'), 'duckduckgo should have answered')
+    assert.ok(!/cap of 1/.test(second.content ?? ''), 'no cap note when another engine produced results')
+  } finally {
+    globalThis.fetch = realFetch
+  }
 })
