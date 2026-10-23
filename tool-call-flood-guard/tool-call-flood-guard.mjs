@@ -2,13 +2,13 @@
  * tool-call-flood-guard -- stops one assistant reply from flooding the context
  * with tool calls. Added 2026-09-26.
  *
- * Why: MiMo-V2.6 sometimes degenerates inside a single reply and emits the same
- * tool call hundreds of times until its output cap (seen: 739 identical `glob`
- * calls in one reply; 394 calls that were 4 edits x ~37). DSH ran every call,
- * the results took one session from under 80% to 988k of a 1M window in a
- * single step -- past compaction's threshold before it could act -- and then
- * the summary request itself overflowed. The shipped `repeat-tool-reminder`
- * cannot help: it is advisory by contract and only reminds after a call.
+ * Why: a model can degenerate inside a single reply and emit the same tool call
+ * many times until its output cap (observed in the author's setup with one
+ * local model; exact counts were not recorded). DSH runs every call, so the
+ * results can fill the context window in one step, past compaction's threshold
+ * before it can act, and the summary request itself can then overflow. The
+ * shipped `repeat-tool-reminder` cannot help: it is advisory by contract and
+ * only reminds after a call.
  *
  * What: a `tools/pre-execute` listener. Calls reach it in model order, before
  * dispatch and before any approval prompt. Within one assistant step:
@@ -27,7 +27,7 @@
  *     of the current turn; the history resets at each new turn;
  *   - after `maxStepsPerTurn` model steps in one turn every further tool call
  *     is denied with a wrap-up message, so an agent that keeps "diagnosing"
- *     (a 30-minute PDF-glyph loop is what prompted this) has to answer.
+ *     in a long loop (one such session prompted this) has to answer.
  *
  * Config (all optional; bad values throw at load -- fail loud):
  *   maxCallsPerStep: integer >= 1          default 64

@@ -11,7 +11,8 @@ Every 30 s, for each `llm-pi-ai` provider that has a `baseURL` and an `api` of `
 - asks DSH to discover the models the endpoint serves and **merges new ones** into the provider's `models` (entries you already have,
   with your edits, are kept as they are);
 - sets a `  [up]` or `  [down]` marker on the provider's `displayName`, only when it already has one, and only when the state changes;
-- sets `transport: sse` on providers that have no `transport` yet (once).
+- sets `transport: sse` on every provider that has a `baseURL` and no `transport` yet (once), **whatever its `api`**: this step is not limited
+  to the three `api` values above.
 
 Writes go through DSH's own settings API (`settings.mutate`), so DSH keeps your file's comments.
 
@@ -19,9 +20,9 @@ Writes go through DSH's own settings API (`settings.mutate`), so DSH keeps your 
 
 - It **rewrites settings**: `displayName` gains a marker and `transport` may be set. Remove the plugin and the markers stay until you edit them out.
 - It probes **every** eligible provider's `baseURL`, including hosted ones, every 30 s. If you do not want a provider probed, give it an `api`
-  value outside the three above.
+  value outside the three above (the `transport` write above still reaches that provider).
 - The poll interval (30 s) is a constant in the file.
-- It has no tests yet.
+- It has no automated tests; the other three plugins in this repo do.
 
 ## Install
 

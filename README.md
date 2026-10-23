@@ -2,7 +2,7 @@
 
 Small plugins for [DSH (DeepSeek Harness)](https://github.com/deepseek-ai/deepseek-harness), written while running local model servers.
 These are independent community plugins, not part of DSH or affiliated with its authors.
-Each folder is one plugin with its own README and tests (`node --test <folder>/<name>.test.mjs`, Node 22).
+Each folder is one plugin with its own README. All but `live-model-refresh` have unit tests (`node --test <folder>/<name>.test.mjs`, Node 22).
 
 | Plugin | What it does |
 |---|---|
@@ -30,5 +30,6 @@ Questions and bug reports: open an issue. For a security problem, see [SECURITY.
 
 ## Status
 
-Written for a personal setup and shared as is. Tested with the unit tests in each folder; not tested against every DSH version.
-Check the DSH version you run before using them.
+Written for a personal setup and shared as is. `serve-pull`, `tool-call-flood-guard` and `web-search-keyless` have unit tests;
+`live-model-refresh` has none. The plugins that read settings use `describe()`, which the code comments tie to DSH 0.1.7 or newer.
+Last run by the author with DSH 0.2.1-rc.2 (October 2026); other versions are not tested, so check the DSH version you run.
