@@ -10,6 +10,9 @@ It registers a provider (`keyless-http`) with several engines, chosen in the con
 | `bing` | no | the Bing HTML results page (scraping; **read the warning below**) | off |
 | `brave` | **yes** | the [Brave Search API](https://brave.com/search/api/) (an official API with a key; plans, quotas and prices change, and a free plan may not be offered to new accounts, so check their current pricing) | off |
 
+**Recommended: use an official API (Brave) for anything beyond casual use.** The keyless default reads public pages and is best-effort;
+an API gives you stable results and clear terms. See [the Brave route](#the-easy-paid-route-brave-search-api) below.
+
 Self-contained: no package imports, only the global `fetch`. It honours `AbortSignal`.
 
 ## Install
@@ -84,6 +87,10 @@ terms restrict automated access to its result pages. Read them before you enable
 own machine, you are responsible for how you use it, and it comes with no warranty (see the licence). Bing's page markup also changes
 without notice, which then quietly returns fewer results. The DuckDuckGo HTML page is also a scraped page, so the same caution applies
 to it, in a smaller way. If that bothers you, use only the Instant Answer API (a public endpoint) or an official API such as Brave's.
+
+What was checked (October 2026): DuckDuckGo's terms contain no language about automated access and ask users to use its services "as
+authorized." The Acceptable Use Policy they link to could not be read when checked, so whether scraping the HTML results page is
+permitted is unverified. The Instant Answer and Brave options avoid the question.
 
 ## Adding another provider
 
