@@ -7,4 +7,4 @@ These plugins fetch data over the network and write DSH settings, so a security 
 
 Useful details: the plugin and version (commit), what you did, what you expected, and what happened.
 
-These plugins are shared as is, by one person, with no guaranteed response time.
+These plugins are shared as is, with no guaranteed response time.
