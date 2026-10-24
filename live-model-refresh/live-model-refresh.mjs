@@ -80,7 +80,7 @@ export function apply(ctx) {
   // Reachability marker on displayName. DSH's own green dot means "route
   // registered", not "endpoint answering" (ui-settings-models store.ts builds
   // it from llm/listProviders), so a server that is off still reads green.
-  // This probe already knows the truth every cycle; surface it in the one
+  // This probe already has the current state every cycle; surface it in the one
   // field the settings list shows. Rewritten only when the state flips.
   const MARKER = /\s*\[(?:up|down)\]\s*$/
   const statusMarkerOp = (key, p, reachable) => {
